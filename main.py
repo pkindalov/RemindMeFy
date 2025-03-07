@@ -14,9 +14,9 @@ from PyQt5.QtCore import QTimer, QDateTime
 # A simple Note class to hold each note's data.
 class Note:
     def __init__(self, date_time, text, last_reminder=None):
-        self.date_time = date_time  # a datetime.datetime object
+        self.date_time = date_time  # datetime.datetime object
         self.text = text
-        self.last_reminder = last_reminder  # last reminder time as a datetime.datetime
+        self.last_reminder = last_reminder  # datetime.datetime object
 
     def to_dict(self):
         return {
@@ -52,11 +52,12 @@ class ReminderDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Notes Reminder App")
+        self.setWindowTitle("RemindMeFy")
         self.notes = []
         self.load_notes()
         self.settings = {"startup": False, "days_earlier": 1}
         self.load_settings()
+        self.current_edit_index = None  # To keep track of the note being edited
         self.init_ui()
         self.init_timer()
 
@@ -68,9 +69,10 @@ class MainWindow(QMainWindow):
         self.notes_tab = QWidget()
         notes_layout = QVBoxLayout()
 
-        # Date and Time picker
+        # Date and Time picker with proper display format (including hours and minutes)
         notes_layout.addWidget(QLabel("Select Date and Time:"))
         self.date_time_edit = QDateTimeEdit()
+        self.date_time_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
         self.date_time_edit.setCalendarPopup(True)
         self.date_time_edit.setDateTime(QDateTime.currentDateTime())
         notes_layout.addWidget(self.date_time_edit)
@@ -80,14 +82,27 @@ class MainWindow(QMainWindow):
         self.note_text = QTextEdit()
         notes_layout.addWidget(self.note_text)
 
-        # Save button
-        self.save_button = QPushButton("Save Note")
-        self.save_button.clicked.connect(self.save_note)
-        notes_layout.addWidget(self.save_button)
+        # Buttons for adding, updating, and clearing selection
+        button_layout = QHBoxLayout()
+        self.add_button = QPushButton("Add Note")
+        self.add_button.clicked.connect(self.add_note)
+        button_layout.addWidget(self.add_button)
+
+        self.update_button = QPushButton("Update Note")
+        self.update_button.setEnabled(False)
+        self.update_button.clicked.connect(self.update_note)
+        button_layout.addWidget(self.update_button)
+
+        self.clear_button = QPushButton("Clear Selection")
+        self.clear_button.clicked.connect(self.clear_selection)
+        button_layout.addWidget(self.clear_button)
+
+        notes_layout.addLayout(button_layout)
 
         # List of saved notes
         notes_layout.addWidget(QLabel("Saved Notes:"))
         self.notes_list = QListWidget()
+        self.notes_list.itemClicked.connect(self.load_note_details)
         self.update_notes_list()
         notes_layout.addWidget(self.notes_list)
 
@@ -125,7 +140,7 @@ class MainWindow(QMainWindow):
             display_text = f"{note.date_time.strftime('%Y-%m-%d %H:%M')} - {note.text}"
             self.notes_list.addItem(display_text)
 
-    def save_note(self):
+    def add_note(self):
         dt = self.date_time_edit.dateTime().toPyDateTime()
         text = self.note_text.toPlainText().strip()
         if text:
@@ -133,7 +148,37 @@ class MainWindow(QMainWindow):
             self.notes.append(new_note)
             self.update_notes_list()
             self.note_text.clear()
+            self.clear_selection()
             self.save_notes()
+
+    def update_note(self):
+        if self.current_edit_index is not None:
+            dt = self.date_time_edit.dateTime().toPyDateTime()
+            text = self.note_text.toPlainText().strip()
+            if text:
+                note = self.notes[self.current_edit_index]
+                note.date_time = dt
+                note.text = text
+                note.last_reminder = None  # Reset reminder history on update
+                self.update_notes_list()
+                self.save_notes()
+                self.clear_selection()
+
+    def clear_selection(self):
+        self.notes_list.clearSelection()
+        self.current_edit_index = None
+        self.note_text.clear()
+        self.date_time_edit.setDateTime(QDateTime.currentDateTime())
+        self.update_button.setEnabled(False)
+
+    def load_note_details(self, item):
+        index = self.notes_list.row(item)
+        if index >= 0 and index < len(self.notes):
+            self.current_edit_index = index
+            note = self.notes[index]
+            self.date_time_edit.setDateTime(QDateTime(note.date_time))
+            self.note_text.setText(note.text)
+            self.update_button.setEnabled(True)
 
     def load_notes(self):
         if os.path.exists("notes.json"):
@@ -183,10 +228,10 @@ class MainWindow(QMainWindow):
                 # Create a registry entry to run this script at startup.
                 exe_path = sys.executable
                 script_path = os.path.abspath(__file__)
-                winreg.SetValueEx(key, "NotesReminderApp", 0, winreg.REG_SZ, f'"{exe_path}" "{script_path}"')
+                winreg.SetValueEx(key, "RemindMeFy", 0, winreg.REG_SZ, f'"{exe_path}" "{script_path}"')
             else:
                 try:
-                    winreg.DeleteValue(key, "NotesReminderApp")
+                    winreg.DeleteValue(key, "RemindMeFy")
                 except Exception:
                     pass
         except Exception as e:
