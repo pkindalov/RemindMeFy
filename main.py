@@ -12,12 +12,12 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import QTimer, QDate, QTime, Qt
 from PyQt5.QtGui import QIcon
 
-# Note class stores event data and ext reminder info.
+# Note class stores the event data and the time of the last ext reminder.
 class Note:
     def __init__(self, date_time, text, last_ext_reminder=None):
-        self.date_time = date_time            # Target datetime for the note/event
+        self.date_time = date_time            # Target datetime for the event
         self.text = text                      # Note text
-        self.last_ext_reminder = last_ext_reminder  # The last ext reminder time (if any)
+        self.last_ext_reminder = last_ext_reminder  # Last ext reminder time (if any)
 
     def to_dict(self):
         return {
@@ -33,7 +33,7 @@ class Note:
         lr = datetime.datetime.fromisoformat(d['last_ext_reminder']) if d.get('last_ext_reminder') else None
         return cls(dt, text, lr)
 
-# A dialog to display the reminder.
+# Dialog that shows a reminder (either ext or final).
 class ReminderDialog(QDialog):
     def __init__(self, note, reminder_type):
         super().__init__()
@@ -57,17 +57,18 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("RemindMeFy")
-        self.app_start_time = datetime.datetime.now()  # Record the app start time
+        self.app_start_time = datetime.datetime.now()  # Record the app's start time
         self.notes = []
         self.load_notes()
-        # Settings: we use app_start_time for all events.
-        # ext_reminder_interval_hours: how often to remind for events (default 4 hours)
-        self.settings = {"startup": False, "ext_reminder_interval_hours": 4}
+        # Settings:
+        # "days_earlier": if the event is within this many days from now, ext reminders are active.
+        # "ext_reminder_interval_hours": ext reminders are issued every that many hours.
+        self.settings = {"startup": False, "days_earlier": 2, "ext_reminder_interval_hours": 4}
         self.load_settings()
         self.current_edit_index = None
         self.init_ui()
         self.init_tray_icon()
-        # For testing, timer interval is 10 seconds; change to 60000 ms for production.
+        # For testing, the timer checks every 10 seconds; change to 60000 ms for production.
         self.init_timer(interval_ms=10000)
 
     def init_ui(self):
@@ -92,7 +93,7 @@ class MainWindow(QMainWindow):
         notes_layout.addWidget(QLabel("Enter Note:"))
         self.note_text = QTextEdit()
         notes_layout.addWidget(self.note_text)
-        # Only one dynamic Next Reminder label is kept.
+        # Only one dynamic Next Reminder label is shown.
         self.next_reminder_label = QLabel("N/A")
         notes_layout.addWidget(self.next_reminder_label)
         btn_layout = QHBoxLayout()
@@ -103,6 +104,10 @@ class MainWindow(QMainWindow):
         self.update_button.setEnabled(False)
         self.update_button.clicked.connect(self.update_note)
         btn_layout.addWidget(self.update_button)
+        self.delete_button = QPushButton("Delete Note")
+        self.delete_button.setEnabled(False)
+        self.delete_button.clicked.connect(self.delete_note)
+        btn_layout.addWidget(self.delete_button)
         self.clear_button = QPushButton("Clear Selection")
         self.clear_button.clicked.connect(self.clear_selection)
         btn_layout.addWidget(self.clear_button)
@@ -120,6 +125,12 @@ class MainWindow(QMainWindow):
         self.startup_checkbox = QCheckBox("Start with Windows")
         self.startup_checkbox.setChecked(self.settings.get("startup", False))
         settings_layout.addWidget(self.startup_checkbox)
+        settings_layout.addWidget(QLabel("Days earlier to start reminding:"))
+        self.days_spinbox = QSpinBox()
+        self.days_spinbox.setMinimum(0)
+        self.days_spinbox.setMaximum(30)
+        self.days_spinbox.setValue(self.settings.get("days_earlier", 2))
+        settings_layout.addWidget(self.days_spinbox)
         settings_layout.addWidget(QLabel("Ext Reminder Frequency (hours):"))
         self.ext_interval_spinbox = QSpinBox()
         self.ext_interval_spinbox.setMinimum(1)
@@ -183,6 +194,13 @@ class MainWindow(QMainWindow):
                 self.save_notes()
                 self.clear_selection()
 
+    def delete_note(self):
+        if self.current_edit_index is not None:
+            del self.notes[self.current_edit_index]
+            self.update_notes_list()
+            self.clear_selection()
+            self.save_notes()
+
     def clear_selection(self):
         self.notes_list.clearSelection()
         self.current_edit_index = None
@@ -191,6 +209,7 @@ class MainWindow(QMainWindow):
         self.time_edit.setTime(datetime.datetime.now().time().replace(second=0, microsecond=0))
         self.next_reminder_label.setText("N/A")
         self.update_button.setEnabled(False)
+        self.delete_button.setEnabled(False)
 
     def load_note_details(self, item):
         index = self.notes_list.row(item)
@@ -201,6 +220,7 @@ class MainWindow(QMainWindow):
             self.time_edit.setTime(QTime(note.date_time.hour, note.date_time.minute))
             self.note_text.setText(note.text)
             self.update_button.setEnabled(True)
+            self.delete_button.setEnabled(True)
             next_rem, r_type = self.compute_next_reminder(note)
             if next_rem:
                 if r_type == "ext":
@@ -214,20 +234,29 @@ class MainWindow(QMainWindow):
 
     def compute_next_reminder(self, note):
         """
-        Uses the app start time as baseline for all ext reminders.
+        Computes the next reminder time and its type for all events.
+        Uses the app's start time as baseline for ext reminders.
         - If the event is within 10 minutes from now, returns (event time, "final").
-        - Otherwise, computes:
-             next_ext = app_start_time + n × (ext_reminder_interval)
-          with n being the smallest integer such that next_ext > now.
-        - If next_ext is later than the event, returns the event time as final reminder.
+        - Otherwise, if the event is more than the specified "days earlier" (converted to days)
+          away, then no reminder is active yet.
+        - If the event is within the "days earlier" window (or on the same day as app start),
+          compute:
+                next_ext = app_start_time + n × (ext reminder interval)
+          where n is the smallest integer such that next_ext > now.
+        - If the computed next_ext is after the event time, return (event time, "final").
         """
         now = datetime.datetime.now()
         target = note.date_time
         threshold = datetime.timedelta(minutes=10)
         ext_interval = datetime.timedelta(hours=self.settings.get("ext_reminder_interval_hours", 4))
+        days_earlier = datetime.timedelta(days=self.settings.get("days_earlier", 2))
         # If event is within 10 minutes, final reminder.
         if target - now <= threshold:
             return (target, "final")
+        # Only start ext reminders if event is within the days_earlier window.
+        if target - now > days_earlier:
+            return (None, None)
+        # Use app start time as baseline.
         baseline = self.app_start_time
         if now < baseline:
             next_ext = baseline
@@ -263,15 +292,18 @@ class MainWindow(QMainWindow):
                     self.settings = json.load(f)
                 if "ext_reminder_interval_hours" not in self.settings:
                     self.settings["ext_reminder_interval_hours"] = 4
+                if "days_earlier" not in self.settings:
+                    self.settings["days_earlier"] = 2
             except Exception as e:
                 print("Error loading settings:", e)
-                self.settings = {"startup": False, "ext_reminder_interval_hours": 4}
+                self.settings = {"startup": False, "ext_reminder_interval_hours": 4, "days_earlier": 2}
         else:
-            self.settings = {"startup": False, "ext_reminder_interval_hours": 4}
+            self.settings = {"startup": False, "ext_reminder_interval_hours": 4, "days_earlier": 2}
 
     def save_settings(self):
         self.settings["startup"] = self.startup_checkbox.isChecked()
         self.settings["ext_reminder_interval_hours"] = self.ext_interval_spinbox.value()
+        self.settings["days_earlier"] = self.days_spinbox.value()
         try:
             with open("settings.json", "w") as f:
                 json.dump(self.settings, f)
