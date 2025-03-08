@@ -12,12 +12,12 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import QTimer, QDate, QTime, Qt
 from PyQt5.QtGui import QIcon
 
-# Note class stores the event data and the time of the last ext reminder.
+# Note class stores the event data and the last ext reminder time.
 class Note:
     def __init__(self, date_time, text, last_ext_reminder=None):
         self.date_time = date_time            # Target datetime for the event
         self.text = text                      # Note text
-        self.last_ext_reminder = last_ext_reminder  # Last ext reminder time (if any)
+        self.last_ext_reminder = last_ext_reminder  # The last ext reminder time (if any)
 
     def to_dict(self):
         return {
@@ -33,7 +33,7 @@ class Note:
         lr = datetime.datetime.fromisoformat(d['last_ext_reminder']) if d.get('last_ext_reminder') else None
         return cls(dt, text, lr)
 
-# Dialog that shows a reminder (either ext or final).
+# A dialog to display a reminder.
 class ReminderDialog(QDialog):
     def __init__(self, note, reminder_type):
         super().__init__()
@@ -57,18 +57,18 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("RemindMeFy")
-        self.app_start_time = datetime.datetime.now()  # Record the app's start time
+        self.app_start_time = datetime.datetime.now()  # Record the app start time
         self.notes = []
         self.load_notes()
         # Settings:
-        # "days_earlier": if the event is within this many days from now, ext reminders are active.
-        # "ext_reminder_interval_hours": ext reminders are issued every that many hours.
+        # - days_earlier: number of days before an event at which ext reminders should start.
+        # - ext_reminder_interval_hours: ext reminders are issued every this many hours.
         self.settings = {"startup": False, "days_earlier": 2, "ext_reminder_interval_hours": 4}
         self.load_settings()
         self.current_edit_index = None
         self.init_ui()
         self.init_tray_icon()
-        # For testing, the timer checks every 10 seconds; change to 60000 ms for production.
+        # For testing, timer checks every 10 seconds; change to 60000 ms for production.
         self.init_timer(interval_ms=10000)
 
     def init_ui(self):
@@ -93,7 +93,7 @@ class MainWindow(QMainWindow):
         notes_layout.addWidget(QLabel("Enter Note:"))
         self.note_text = QTextEdit()
         notes_layout.addWidget(self.note_text)
-        # Only one dynamic Next Reminder label is shown.
+        # Dynamic Next Reminder label
         self.next_reminder_label = QLabel("N/A")
         notes_layout.addWidget(self.next_reminder_label)
         btn_layout = QHBoxLayout()
@@ -122,21 +122,33 @@ class MainWindow(QMainWindow):
         # --- Settings Tab ---
         self.settings_tab = QWidget()
         settings_layout = QVBoxLayout()
+        # Startup setting with description.
         self.startup_checkbox = QCheckBox("Start with Windows")
         self.startup_checkbox.setChecked(self.settings.get("startup", False))
         settings_layout.addWidget(self.startup_checkbox)
+        desc_startup = QLabel("If checked, RemindMeFy will automatically start when Windows boots.")
+        desc_startup.setStyleSheet("font-size: 10pt; color: gray;")
+        settings_layout.addWidget(desc_startup)
+        # Days earlier to start reminding with description.
         settings_layout.addWidget(QLabel("Days earlier to start reminding:"))
         self.days_spinbox = QSpinBox()
         self.days_spinbox.setMinimum(0)
         self.days_spinbox.setMaximum(30)
         self.days_spinbox.setValue(self.settings.get("days_earlier", 2))
         settings_layout.addWidget(self.days_spinbox)
+        desc_days = QLabel("Defines how many days before the event ext reminders should begin.")
+        desc_days.setStyleSheet("font-size: 10pt; color: gray;")
+        settings_layout.addWidget(desc_days)
+        # Ext Reminder Frequency with description.
         settings_layout.addWidget(QLabel("Ext Reminder Frequency (hours):"))
         self.ext_interval_spinbox = QSpinBox()
         self.ext_interval_spinbox.setMinimum(1)
         self.ext_interval_spinbox.setMaximum(24)
         self.ext_interval_spinbox.setValue(self.settings.get("ext_reminder_interval_hours", 4))
         settings_layout.addWidget(self.ext_interval_spinbox)
+        desc_ext = QLabel("Specifies how often (in hours) to send reminders during the reminder window.")
+        desc_ext.setStyleSheet("font-size: 10pt; color: gray;")
+        settings_layout.addWidget(desc_ext)
         self.save_settings_button = QPushButton("Save Settings")
         self.save_settings_button.clicked.connect(self.save_settings)
         settings_layout.addWidget(self.save_settings_button)
@@ -221,42 +233,46 @@ class MainWindow(QMainWindow):
             self.note_text.setText(note.text)
             self.update_button.setEnabled(True)
             self.delete_button.setEnabled(True)
-            next_rem, r_type = self.compute_next_reminder(note)
-            if next_rem:
-                if r_type == "ext":
-                    self.next_reminder_label.setText("Next Reminder at " + next_rem.strftime("%Y-%m-%d %H:%M"))
-                elif r_type == "final":
-                    self.next_reminder_label.setText("Final Reminder at " + next_rem.strftime("%H:%M"))
-                else:
-                    self.next_reminder_label.setText(next_rem.strftime("%Y-%m-%d %H:%M"))
+            now = datetime.datetime.now()
+            # Set "Event Passed" if the event datetime is before now.
+            if note.date_time < now:
+                self.next_reminder_label.setText("Event Passed")
+                self.next_reminder_label.setStyleSheet("color: red;")
             else:
-                self.next_reminder_label.setText("No upcoming reminder")
+                self.next_reminder_label.setStyleSheet("")
+                next_rem, r_type = self.compute_next_reminder(note)
+                if next_rem:
+                    if r_type == "ext":
+                        self.next_reminder_label.setText("Next Reminder at " + next_rem.strftime("%Y-%m-%d %H:%M"))
+                    elif r_type == "final":
+                        self.next_reminder_label.setText("Final Reminder at " + next_rem.strftime("%H:%M"))
+                    else:
+                        self.next_reminder_label.setText(next_rem.strftime("%Y-%m-%d %H:%M"))
+                else:
+                    self.next_reminder_label.setText("No upcoming reminder")
 
     def compute_next_reminder(self, note):
         """
-        Computes the next reminder time and its type for all events.
-        Uses the app's start time as baseline for ext reminders.
+        Uses the app's start time as the baseline for all ext reminders.
         - If the event is within 10 minutes from now, returns (event time, "final").
-        - Otherwise, if the event is more than the specified "days earlier" (converted to days)
-          away, then no reminder is active yet.
-        - If the event is within the "days earlier" window (or on the same day as app start),
-          compute:
-                next_ext = app_start_time + n × (ext reminder interval)
+        - If the event is more than the specified "days earlier" (converted to days) away, returns (None, None).
+        - Otherwise, computes:
+             next_ext = app_start_time + n × (ext_reminder_interval)
           where n is the smallest integer such that next_ext > now.
-        - If the computed next_ext is after the event time, return (event time, "final").
+        - If next_ext is later than the event time, returns (event time, "final").
         """
         now = datetime.datetime.now()
         target = note.date_time
         threshold = datetime.timedelta(minutes=10)
         ext_interval = datetime.timedelta(hours=self.settings.get("ext_reminder_interval_hours", 4))
         days_earlier = datetime.timedelta(days=self.settings.get("days_earlier", 2))
-        # If event is within 10 minutes, final reminder.
+        # If event is within 10 minutes, use final reminder.
         if target - now <= threshold:
             return (target, "final")
-        # Only start ext reminders if event is within the days_earlier window.
+        # Only start ext reminders if the event is within the days_earlier window.
         if target - now > days_earlier:
             return (None, None)
-        # Use app start time as baseline.
+        # Compute next ext reminder based on the app start time.
         baseline = self.app_start_time
         if now < baseline:
             next_ext = baseline
