@@ -12,11 +12,11 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import QTimer, QDate, QTime, Qt
 from PyQt5.QtGui import QIcon
 
-# Note class stores the event time and text, and remembers if ext reminders have been triggered.
+# Note class stores event data and ext reminder info.
 class Note:
     def __init__(self, date_time, text, last_ext_reminder=None):
-        self.date_time = date_time            # The target datetime for the note/event
-        self.text = text                      # The note text
+        self.date_time = date_time            # Target datetime for the note/event
+        self.text = text                      # Note text
         self.last_ext_reminder = last_ext_reminder  # The last ext reminder time (if any)
 
     def to_dict(self):
@@ -33,7 +33,7 @@ class Note:
         lr = datetime.datetime.fromisoformat(d['last_ext_reminder']) if d.get('last_ext_reminder') else None
         return cls(dt, text, lr)
 
-# A simple dialog to display a reminder.
+# A dialog to display the reminder.
 class ReminderDialog(QDialog):
     def __init__(self, note, reminder_type):
         super().__init__()
@@ -50,7 +50,7 @@ class ReminderDialog(QDialog):
         dismiss.clicked.connect(self.accept)
         layout.addWidget(dismiss)
         self.setLayout(layout)
-        # Force the dialog to appear on top.
+        # Ensure the dialog appears on top.
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
 
 class MainWindow(QMainWindow):
@@ -60,18 +60,14 @@ class MainWindow(QMainWindow):
         self.app_start_time = datetime.datetime.now()  # Record the app start time
         self.notes = []
         self.load_notes()
-        # Settings:
-        # - ext_reminder_interval_hours: How often (in hours) to remind for events (default 4)
-        # - days_earlier: (Not used now since we use the app start time for all events)
-        self.settings = {
-            "startup": False,
-            "ext_reminder_interval_hours": 4
-        }
+        # Settings: we use app_start_time for all events.
+        # ext_reminder_interval_hours: how often to remind for events (default 4 hours)
+        self.settings = {"startup": False, "ext_reminder_interval_hours": 4}
         self.load_settings()
         self.current_edit_index = None
         self.init_ui()
         self.init_tray_icon()
-        # For testing, use a 10-second timer; change to 60000 ms for production.
+        # For testing, timer interval is 10 seconds; change to 60000 ms for production.
         self.init_timer(interval_ms=10000)
 
     def init_ui(self):
@@ -96,7 +92,7 @@ class MainWindow(QMainWindow):
         notes_layout.addWidget(QLabel("Enter Note:"))
         self.note_text = QTextEdit()
         notes_layout.addWidget(self.note_text)
-        notes_layout.addWidget(QLabel("Next Reminder:"))
+        # Only one dynamic Next Reminder label is kept.
         self.next_reminder_label = QLabel("N/A")
         notes_layout.addWidget(self.next_reminder_label)
         btn_layout = QHBoxLayout()
@@ -218,11 +214,12 @@ class MainWindow(QMainWindow):
 
     def compute_next_reminder(self, note):
         """
-        Computes the next reminder time and its type for all events using the app start time as baseline.
-        - If the event is within 10 minutes from now, return (event time, "final").
-        - Otherwise, compute next_ext = app_start_time + n × ext_interval such that next_ext > now.
-          If next_ext is before the event, return (next_ext, "ext"); if it would fall after the event,
-          return (event time, "final").
+        Uses the app start time as baseline for all ext reminders.
+        - If the event is within 10 minutes from now, returns (event time, "final").
+        - Otherwise, computes:
+             next_ext = app_start_time + n × (ext_reminder_interval)
+          with n being the smallest integer such that next_ext > now.
+        - If next_ext is later than the event, returns the event time as final reminder.
         """
         now = datetime.datetime.now()
         target = note.date_time
@@ -231,15 +228,12 @@ class MainWindow(QMainWindow):
         # If event is within 10 minutes, final reminder.
         if target - now <= threshold:
             return (target, "final")
-        # Use app start time as baseline.
         baseline = self.app_start_time
-        # Compute the smallest integer n such that baseline + n * ext_interval > now.
         if now < baseline:
             next_ext = baseline
         else:
             n = ceil((now - baseline).total_seconds() / ext_interval.total_seconds())
             next_ext = baseline + n * ext_interval
-        # If the computed ext reminder is after the event, use final reminder.
         if next_ext >= target:
             return (target, "final")
         return (next_ext, "ext")
@@ -311,9 +305,6 @@ class MainWindow(QMainWindow):
                 if next_rem and now >= next_rem:
                     self.show_reminder(note, r_type)
                     note.last_ext_reminder = now
-            else:
-                # If the event time has passed, do nothing.
-                pass
         self.save_notes()
 
     def show_reminder(self, note, r_type):
