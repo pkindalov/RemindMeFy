@@ -7,7 +7,7 @@ from math import ceil
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout,
     QHBoxLayout, QPushButton, QTextEdit, QDateEdit, QTimeEdit, QLabel,
-    QCheckBox, QSpinBox, QListWidget, QDialog, QSystemTrayIcon, QMenu, QStyle
+    QCheckBox, QSpinBox, QListWidget, QDialog, QSystemTrayIcon, QMenu, QStyle, QToolButton
 )
 from PyQt5.QtCore import QTimer, QDate, QTime, Qt
 from PyQt5.QtGui import QIcon
@@ -17,7 +17,7 @@ class Note:
     def __init__(self, date_time, text, last_ext_reminder=None, pre_final_triggered=False, final_reminder_triggered=False):
         self.date_time = date_time            # Event datetime
         self.text = text                      # Note text
-        self.last_ext_reminder = last_ext_reminder  # Last ext reminder time (if any)
+        self.last_ext_reminder = last_ext_reminder  # Last external reminder time (if any)
         self.pre_final_triggered = pre_final_triggered  # True if pre-final reminder was triggered
         self.final_reminder_triggered = final_reminder_triggered  # True if final reminder was triggered
 
@@ -66,10 +66,12 @@ class MainWindow(QMainWindow):
         self.app_start_time = datetime.datetime.now()  # (Unused in this near-event logic)
         self.notes = []
         self.load_notes()
-        # Settings: days_earlier = reminder window (days before event); ext_reminder_interval_hours = frequency (not used for near events)
+        # Settings: days_earlier = reminder window (days before event); ext_reminder_interval_hours not used for near events.
         self.settings = {"startup": False, "days_earlier": 2, "ext_reminder_interval_hours": 4}
         self.load_settings()
         self.current_edit_index = None
+        self.sorting_enabled = False  # Sorting toggle off by default
+        self.displayed_notes = []     # This will hold the currently displayed (sorted or unsorted) list.
         self.init_ui()
         self.init_tray_icon()
         # Timer interval: 10 seconds for testing; 60000 for production.
@@ -118,7 +120,18 @@ class MainWindow(QMainWindow):
         self.clear_button.clicked.connect(self.clear_selection)
         btn_layout.addWidget(self.clear_button)
         notes_layout.addLayout(btn_layout)
-        notes_layout.addWidget(QLabel("Saved Notes:"))
+        # Horizontal layout for "Saved Notes:" label and sort toggle button.
+        saved_notes_layout = QHBoxLayout()
+        saved_notes_label = QLabel("Saved Notes:")
+        saved_notes_layout.addWidget(saved_notes_label)
+        self.sort_button = QToolButton()
+        # Initially unsorted: arrow up
+        self.sort_button.setIcon(self.style().standardIcon(QStyle.SP_ArrowUp))
+        self.sort_button.setToolTip("Turn sorting ON")
+        self.sort_button.clicked.connect(self.toggle_sorting)
+        saved_notes_layout.addWidget(self.sort_button)
+        saved_notes_layout.addStretch()
+        notes_layout.addLayout(saved_notes_layout)
         self.notes_list = QListWidget()
         self.notes_list.itemClicked.connect(self.load_note_details)
         self.update_notes_list()
@@ -180,11 +193,44 @@ class MainWindow(QMainWindow):
         self.timer.start(interval_ms)
         print("Timer started with interval:", interval_ms, "ms")
 
+    def get_sort_key(self, note):
+        now = datetime.datetime.now()
+        if note.date_time < now:
+            return datetime.datetime.max
+        computed_rem, _, _ = self.compute_next_reminder(note)
+        return computed_rem if computed_rem is not None else note.date_time
+
     def update_notes_list(self):
         self.notes_list.clear()
-        for note in self.notes:
-            dt_str = note.date_time.strftime("%Y-%m-%d %H:%M")
-            self.notes_list.addItem(f"{dt_str} - {note.text}")
+        if self.sorting_enabled:
+            now = datetime.datetime.now()
+            upcoming = [note for note in self.notes if note.date_time >= now]
+            passed = [note for note in self.notes if note.date_time < now]
+            sorted_upcoming = sorted(upcoming, key=lambda note: self.get_sort_key(note))
+            self.displayed_notes = sorted_upcoming + passed
+            print("Sorting enabled. Sorted upcoming order:")
+            for note in sorted_upcoming:
+                key = self.get_sort_key(note)
+                print(f"Note '{note.text}' -> sort key: {key}")
+            for note in self.displayed_notes:
+                dt_str = note.date_time.strftime("%Y-%m-%d %H:%M")
+                self.notes_list.addItem(f"{dt_str} - {note.text}")
+        else:
+            self.displayed_notes = self.notes
+            for note in self.notes:
+                dt_str = note.date_time.strftime("%Y-%m-%d %H:%M")
+                self.notes_list.addItem(f"{dt_str} - {note.text}")
+
+    def toggle_sorting(self):
+        self.sorting_enabled = not self.sorting_enabled
+        print("Toggle sorting, new state:", self.sorting_enabled)
+        if self.sorting_enabled:
+            self.sort_button.setIcon(self.style().standardIcon(QStyle.SP_ArrowDown))
+            self.sort_button.setToolTip("Turn sorting OFF")
+        else:
+            self.sort_button.setIcon(self.style().standardIcon(QStyle.SP_ArrowUp))
+            self.sort_button.setToolTip("Turn sorting ON")
+        self.update_notes_list()
 
     def add_note(self):
         dt = datetime.datetime.combine(self.date_edit.date().toPyDate(), self.time_edit.time().toPyTime())
@@ -202,7 +248,14 @@ class MainWindow(QMainWindow):
             dt = datetime.datetime.combine(self.date_edit.date().toPyDate(), self.time_edit.time().toPyTime())
             text = self.note_text.toPlainText().strip()
             if text:
-                note = self.notes[self.current_edit_index]
+                # When updating, if sorting is enabled, we need to update based on the displayed order.
+                if self.sorting_enabled:
+                    note = self.displayed_notes[self.current_edit_index]
+                    # Find the note in the original self.notes list and update it.
+                    orig_index = self.notes.index(note)
+                    note = self.notes[orig_index]
+                else:
+                    note = self.notes[self.current_edit_index]
                 note.date_time = dt
                 note.text = text
                 note.last_ext_reminder = None
@@ -214,7 +267,12 @@ class MainWindow(QMainWindow):
 
     def delete_note(self):
         if self.current_edit_index is not None:
-            del self.notes[self.current_edit_index]
+            if self.sorting_enabled:
+                # If sorting is enabled, delete from displayed_notes and update self.notes accordingly.
+                note = self.displayed_notes[self.current_edit_index]
+                self.notes.remove(note)
+            else:
+                del self.notes[self.current_edit_index]
             self.update_notes_list()
             self.clear_selection()
             self.save_notes()
@@ -231,10 +289,20 @@ class MainWindow(QMainWindow):
         self.delete_button.setEnabled(False)
 
     def load_note_details(self, item):
-        index = self.notes_list.row(item)
-        if 0 <= index < len(self.notes):
-            self.current_edit_index = index
-            note = self.notes[index]
+        if self.sorting_enabled:
+            # When sorted, use the displayed_notes list.
+            index = self.notes_list.row(item)
+            if 0 <= index < len(self.displayed_notes):
+                note = self.displayed_notes[index]
+                # Set current_edit_index to the index in the original list.
+                self.current_edit_index = self.notes.index(note)
+        else:
+            index = self.notes_list.row(item)
+            if 0 <= index < len(self.notes):
+                self.current_edit_index = index
+                note = self.notes[index]
+        if self.current_edit_index is not None:
+            note = self.notes[self.current_edit_index]
             self.date_edit.setDate(note.date_time.date())
             self.time_edit.setTime(QTime(note.date_time.hour, note.date_time.minute))
             self.note_text.setText(note.text)
@@ -273,7 +341,7 @@ class MainWindow(QMainWindow):
           1. If now >= event time, return (event time, "final", pre_final_time).
           2. If now is between pre_final_time and event time, return (pre_final_time, "pre-final", pre_final_time).
           3. If event is more than the specified "days earlier" away, return (None, None, pre_final_time).
-          4. Otherwise, compute an external reminder based on app_start_time.
+          4. Otherwise, compute an external reminder based on app_start_time:
              - next_ext = app_start_time + n * (ext_reminder_interval), where n is smallest integer such that next_ext > now.
              - If next_ext >= pre_final_time, return (pre_final_time, "pre-final", pre_final_time);
                else, return (next_ext, "ext", pre_final_time).
@@ -301,8 +369,6 @@ class MainWindow(QMainWindow):
         else:
             n = ceil((now - baseline).total_seconds() / ext_interval.total_seconds())
             next_ext = baseline + n * ext_interval
-        # If the computed external reminder falls after the pre-final time,
-        # then the next reminder should be pre-final.
         if next_ext >= pre_final_time:
             return (pre_final_time, "pre-final", pre_final_time)
         return (next_ext, "ext", pre_final_time)
@@ -323,7 +389,6 @@ class MainWindow(QMainWindow):
             with open(temp_file, "w") as f:
                 data = [note.to_dict() for note in self.notes]
                 json.dump(data, f)
-            # os.replace() is atomic on many systems, meaning it either fully replaces the file or not at all.
             os.replace(temp_file, "notes.json")
         except Exception as e:
             print("Error saving notes:", e)
@@ -374,7 +439,6 @@ class MainWindow(QMainWindow):
 
     def check_reminders(self):
         now = datetime.datetime.now()
-        # print("Checking reminders at", now)
         for note in self.notes:
             if note.date_time > now:
                 next_rem, r_type, _ = self.compute_next_reminder(note)
