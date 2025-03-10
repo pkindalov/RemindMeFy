@@ -9,14 +9,15 @@ from PyQt5.QtWidgets import (
     QHBoxLayout, QPushButton, QTextEdit, QDateEdit, QTimeEdit, QLabel,
     QCheckBox, QSpinBox, QListWidget, QDialog, QSystemTrayIcon, QMenu, QStyle, QToolButton
 )
-from PyQt5.QtCore import QTimer, QDate, QTime, Qt
+from PyQt5.QtCore import QTimer, QDate, QTime, Qt, QPoint
 from PyQt5.QtGui import QIcon
 
 # --- Note Class ---
 class Note:
-    def __init__(self, date_time, text, last_ext_reminder=None, pre_final_triggered=False, final_reminder_triggered=False):
+    def __init__(self, date_time, text, sticky=False, last_ext_reminder=None, pre_final_triggered=False, final_reminder_triggered=False):
         self.date_time = date_time            # Event datetime
         self.text = text                      # Note text
+        self.sticky = sticky                  # Whether this note should be shown as a sticky window
         self.last_ext_reminder = last_ext_reminder  # Last external reminder time (if any)
         self.pre_final_triggered = pre_final_triggered  # True if pre-final reminder was triggered
         self.final_reminder_triggered = final_reminder_triggered  # True if final reminder was triggered
@@ -25,6 +26,7 @@ class Note:
         return {
             'date_time': self.date_time.isoformat(),
             'text': self.text,
+            'sticky': self.sticky,
             'last_ext_reminder': self.last_ext_reminder.isoformat() if self.last_ext_reminder else None,
             'pre_final_triggered': self.pre_final_triggered,
             'final_reminder_triggered': self.final_reminder_triggered
@@ -34,10 +36,56 @@ class Note:
     def from_dict(cls, d):
         dt = datetime.datetime.fromisoformat(d['date_time'])
         text = d['text']
+        sticky = d.get('sticky', False)
         lr = datetime.datetime.fromisoformat(d['last_ext_reminder']) if d.get('last_ext_reminder') else None
         pft = d.get('pre_final_triggered', False)
         frt = d.get('final_reminder_triggered', False)
-        return cls(dt, text, lr, pft, frt)
+        return cls(dt, text, sticky, lr, pft, frt)
+
+# --- StickyNoteWindow Class ---
+class StickyNoteWindow(QWidget):
+    def __init__(self, note, parent=None):
+        super().__init__(parent)
+        self.note = note
+        self.parent_window = parent  # Reference to MainWindow
+        self.setWindowTitle("Sticky: " + (note.text[:15] + "..." if len(note.text) > 15 else note.text))
+        # Make the window frameless and always on top.
+        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setStyleSheet("background-color: #FFFB88; border: 2px solid #E6A800;")
+        layout = QVBoxLayout()
+        self.text_label = QLabel(note.text)
+        self.text_label.setWordWrap(True)
+        layout.addWidget(self.text_label)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        layout.addWidget(close_btn)
+        self.setLayout(layout)
+        self.resize(200, 200)
+        self._drag_pos = None
+
+    def update_text(self, new_text):
+        self.text_label.setText(new_text)
+        self.setWindowTitle("Sticky: " + (new_text[:15] + "..." if len(new_text) > 15 else new_text))
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_pos = event.globalPos() - self.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._drag_pos is not None and event.buttons() == Qt.LeftButton:
+            self.move(event.globalPos() - self._drag_pos)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self._drag_pos = None
+        event.accept()
+
+    def closeEvent(self, event):
+        # When closed, notify the parent window to uncheck the sticky checkbox.
+        if self.parent_window:
+            self.parent_window.on_sticky_window_closed(self.note)
+        event.accept()
 
 # --- ReminderDialog Class ---
 class ReminderDialog(QDialog):
@@ -63,18 +111,19 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("RemindMeFy")
-        self.app_start_time = datetime.datetime.now()  # (Unused in this near-event logic)
+        self.app_start_time = datetime.datetime.now()  # (Unused in near-event logic)
         self.notes = []
         self.load_notes()
-        # Settings: days_earlier = reminder window (days before event); ext_reminder_interval_hours not used for near events.
+        # Settings: days_earlier = reminder window; ext_reminder_interval_hours not used for near events.
         self.settings = {"startup": False, "days_earlier": 2, "ext_reminder_interval_hours": 4}
         self.load_settings()
         self.current_edit_index = None
         self.sorting_enabled = False  # Sorting toggle off by default
-        self.displayed_notes = []     # This will hold the currently displayed (sorted or unsorted) list.
+        self.displayed_notes = []     # List of notes currently shown in the list.
+        self.sticky_windows = {}      # Persistent sticky windows for saved notes.
+        self.preview_sticky_window = None  # Preview sticky window for new note.
         self.init_ui()
         self.init_tray_icon()
-        # Timer interval: 10 seconds for testing; 60000 for production.
         self.init_timer(interval_ms=10000)
 
     def init_ui(self):
@@ -99,6 +148,10 @@ class MainWindow(QMainWindow):
         notes_layout.addWidget(QLabel("Enter Note:"))
         self.note_text = QTextEdit()
         notes_layout.addWidget(self.note_text)
+        # Sticky Note checkbox: show preview sticky window immediately.
+        self.sticky_checkbox = QCheckBox("Sticky Note")
+        self.sticky_checkbox.toggled.connect(self.on_sticky_checkbox_toggled)
+        notes_layout.addWidget(self.sticky_checkbox)
         # Dynamic labels for reminders:
         self.next_reminder_label = QLabel("N/A")
         notes_layout.addWidget(self.next_reminder_label)
@@ -120,12 +173,11 @@ class MainWindow(QMainWindow):
         self.clear_button.clicked.connect(self.clear_selection)
         btn_layout.addWidget(self.clear_button)
         notes_layout.addLayout(btn_layout)
-        # Horizontal layout for "Saved Notes:" label and sort toggle button.
+        # Horizontal layout for "Saved Notes:" and sort toggle button.
         saved_notes_layout = QHBoxLayout()
         saved_notes_label = QLabel("Saved Notes:")
         saved_notes_layout.addWidget(saved_notes_label)
         self.sort_button = QToolButton()
-        # Initially unsorted: arrow up
         self.sort_button.setIcon(self.style().standardIcon(QStyle.SP_ArrowUp))
         self.sort_button.setToolTip("Turn sorting ON")
         self.sort_button.clicked.connect(self.toggle_sorting)
@@ -232,47 +284,94 @@ class MainWindow(QMainWindow):
             self.sort_button.setToolTip("Turn sorting ON")
         self.update_notes_list()
 
+    def on_sticky_checkbox_toggled(self, checked):
+        # Immediately show or close a preview sticky window for a new note
+        # (this happens regardless of current_edit_index)
+        if checked:
+            if self.preview_sticky_window is None:
+                preview_note = Note(datetime.datetime.now(), self.note_text.toPlainText(), sticky=True)
+                self.preview_sticky_window = StickyNoteWindow(preview_note, parent=self)
+                self.preview_sticky_window.show()
+        else:
+            if self.preview_sticky_window is not None:
+                self.preview_sticky_window.close()
+                self.preview_sticky_window = None
+
+    def on_sticky_window_closed(self, note):
+        # Called when a sticky window is closed.
+        # If we're in new-note mode, uncheck the sticky checkbox.
+        if self.current_edit_index is None:
+            self.sticky_checkbox.setChecked(False)
+            self.preview_sticky_window = None
+        else:
+            self.sticky_checkbox.setChecked(False)
+
     def add_note(self):
         dt = datetime.datetime.combine(self.date_edit.date().toPyDate(), self.time_edit.time().toPyTime())
         text = self.note_text.toPlainText().strip()
+        sticky = self.sticky_checkbox.isChecked()
         if text:
-            note = Note(dt, text)
+            note = Note(dt, text, sticky=sticky)
             self.notes.append(note)
             self.update_notes_list()
             self.note_text.clear()
             self.clear_selection()
             self.save_notes()
+            if sticky:
+                win = StickyNoteWindow(note, parent=self)
+                win.show()
+                self.sticky_windows[id(note)] = win
+            if self.preview_sticky_window is not None:
+                self.preview_sticky_window.close()
+                self.preview_sticky_window = None
 
     def update_note(self):
         if self.current_edit_index is not None:
             dt = datetime.datetime.combine(self.date_edit.date().toPyDate(), self.time_edit.time().toPyTime())
             text = self.note_text.toPlainText().strip()
+            sticky = self.sticky_checkbox.isChecked()
             if text:
-                # When updating, if sorting is enabled, we need to update based on the displayed order.
                 if self.sorting_enabled:
                     note = self.displayed_notes[self.current_edit_index]
-                    # Find the note in the original self.notes list and update it.
                     orig_index = self.notes.index(note)
                     note = self.notes[orig_index]
                 else:
                     note = self.notes[self.current_edit_index]
                 note.date_time = dt
                 note.text = text
+                note.sticky = sticky
                 note.last_ext_reminder = None
                 note.pre_final_triggered = False
                 note.final_reminder_triggered = False
                 self.update_notes_list()
                 self.save_notes()
                 self.clear_selection()
+                if sticky:
+                    if id(note) in self.sticky_windows:
+                        self.sticky_windows[id(note)].update_text(text)
+                    else:
+                        win = StickyNoteWindow(note, parent=self)
+                        win.show()
+                        self.sticky_windows[id(note)] = win
+                else:
+                    if id(note) in self.sticky_windows:
+                        self.sticky_windows[id(note)].close()
+                        del self.sticky_windows[id(note)]
 
     def delete_note(self):
         if self.current_edit_index is not None:
             if self.sorting_enabled:
-                # If sorting is enabled, delete from displayed_notes and update self.notes accordingly.
                 note = self.displayed_notes[self.current_edit_index]
                 self.notes.remove(note)
+                if id(note) in self.sticky_windows:
+                    self.sticky_windows[id(note)].close()
+                    del self.sticky_windows[id(note)]
             else:
+                note = self.notes[self.current_edit_index]
                 del self.notes[self.current_edit_index]
+                if id(note) in self.sticky_windows:
+                    self.sticky_windows[id(note)].close()
+                    del self.sticky_windows[id(note)]
             self.update_notes_list()
             self.clear_selection()
             self.save_notes()
@@ -287,14 +386,16 @@ class MainWindow(QMainWindow):
         self.pre_final_label.setText("")
         self.update_button.setEnabled(False)
         self.delete_button.setEnabled(False)
+        self.sticky_checkbox.setChecked(False)
+        if self.preview_sticky_window is not None:
+            self.preview_sticky_window.close()
+            self.preview_sticky_window = None
 
     def load_note_details(self, item):
         if self.sorting_enabled:
-            # When sorted, use the displayed_notes list.
             index = self.notes_list.row(item)
             if 0 <= index < len(self.displayed_notes):
                 note = self.displayed_notes[index]
-                # Set current_edit_index to the index in the original list.
                 self.current_edit_index = self.notes.index(note)
         else:
             index = self.notes_list.row(item)
@@ -308,6 +409,7 @@ class MainWindow(QMainWindow):
             self.note_text.setText(note.text)
             self.update_button.setEnabled(True)
             self.delete_button.setEnabled(True)
+            self.sticky_checkbox.setChecked(note.sticky)
             now = datetime.datetime.now()
             if note.date_time < now:
                 self.next_reminder_label.setText("Event Passed")
@@ -334,35 +436,18 @@ class MainWindow(QMainWindow):
                     self.pre_final_label.setText("")
 
     def compute_next_reminder(self, note):
-        """
-        Computes and returns a tuple (next_reminder_time, reminder_type, pre_final_time).
-        pre_final_time is defined as event time minus 10 minutes.
-        Logic:
-          1. If now >= event time, return (event time, "final", pre_final_time).
-          2. If now is between pre_final_time and event time, return (pre_final_time, "pre-final", pre_final_time).
-          3. If event is more than the specified "days earlier" away, return (None, None, pre_final_time).
-          4. Otherwise, compute an external reminder based on app_start_time:
-             - next_ext = app_start_time + n * (ext_reminder_interval), where n is smallest integer such that next_ext > now.
-             - If next_ext >= pre_final_time, return (pre_final_time, "pre-final", pre_final_time);
-               else, return (next_ext, "ext", pre_final_time).
-        """
         now = datetime.datetime.now()
         target = note.date_time
         threshold = datetime.timedelta(minutes=10)
         pre_final_time = target - threshold
         ext_interval = datetime.timedelta(hours=self.settings.get("ext_reminder_interval_hours", 4))
         days_earlier = datetime.timedelta(days=self.settings.get("days_earlier", 2))
-
-        # If the event has already passed.
         if now >= target:
             return (target, "final", pre_final_time)
-        # If we are in the pre-final window.
         if now >= pre_final_time:
             return (pre_final_time, "pre-final", pre_final_time)
-        # If the event is farther away than the reminder window.
         if target - now > days_earlier:
             return (None, None, pre_final_time)
-        # Compute external reminder.
         baseline = self.app_start_time
         if now < baseline:
             next_ext = baseline
