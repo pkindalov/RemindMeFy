@@ -318,10 +318,13 @@ class MainWindow(QMainWindow):
                 self.notes = []
 
     def save_notes(self):
+        temp_file = "notes.json.tmp"
         try:
-            with open("notes.json", "w") as f:
+            with open(temp_file, "w") as f:
                 data = [note.to_dict() for note in self.notes]
                 json.dump(data, f)
+            # os.replace() is atomic on many systems, meaning it either fully replaces the file or not at all.
+            os.replace(temp_file, "notes.json")
         except Exception as e:
             print("Error saving notes:", e)
 
