@@ -1,6 +1,7 @@
 import sys
 import os
 import json
+import uuid
 import datetime
 from math import ceil
 
@@ -9,24 +10,27 @@ from PyQt5.QtWidgets import (
     QHBoxLayout, QPushButton, QTextEdit, QDateEdit, QTimeEdit, QLabel,
     QCheckBox, QSpinBox, QListWidget, QDialog, QSystemTrayIcon, QMenu, QStyle, QToolButton
 )
-from PyQt5.QtCore import QTimer, QDate, QTime, Qt, QPoint
+from PyQt5.QtCore import QTimer, QDate, QTime, Qt, pyqtSignal
 from PyQt5.QtGui import QIcon
 
-# --- Note Class ---
+# --- Note Class with Unique ID ---
 class Note:
-    def __init__(self, date_time, text, sticky=False, last_ext_reminder=None, pre_final_triggered=False, final_reminder_triggered=False):
-        self.date_time = date_time            # Event datetime
-        self.text = text                      # Note text
-        self.sticky = sticky                  # Whether this note should be shown as a sticky window
-        self.last_ext_reminder = last_ext_reminder  # Last external reminder time (if any)
-        self.pre_final_triggered = pre_final_triggered  # True if pre-final reminder was triggered
-        self.final_reminder_triggered = final_reminder_triggered  # True if final reminder was triggered
+    def __init__(self, date_time, text, sticky=False, uid=None,
+                 last_ext_reminder=None, pre_final_triggered=False, final_reminder_triggered=False):
+        self.date_time = date_time
+        self.text = text
+        self.sticky = sticky
+        self.uid = uid or str(uuid.uuid4())
+        self.last_ext_reminder = last_ext_reminder
+        self.pre_final_triggered = pre_final_triggered
+        self.final_reminder_triggered = final_reminder_triggered
 
     def to_dict(self):
         return {
             'date_time': self.date_time.isoformat(),
             'text': self.text,
             'sticky': self.sticky,
+            'uid': self.uid,
             'last_ext_reminder': self.last_ext_reminder.isoformat() if self.last_ext_reminder else None,
             'pre_final_triggered': self.pre_final_triggered,
             'final_reminder_triggered': self.final_reminder_triggered
@@ -37,19 +41,19 @@ class Note:
         dt = datetime.datetime.fromisoformat(d['date_time'])
         text = d['text']
         sticky = d.get('sticky', False)
+        uid = d.get('uid')
         lr = datetime.datetime.fromisoformat(d['last_ext_reminder']) if d.get('last_ext_reminder') else None
         pft = d.get('pre_final_triggered', False)
         frt = d.get('final_reminder_triggered', False)
-        return cls(dt, text, sticky, lr, pft, frt)
+        return cls(dt, text, sticky, uid, lr, pft, frt)
 
 # --- StickyNoteWindow Class ---
 class StickyNoteWindow(QWidget):
-    def __init__(self, note, parent=None):
-        super().__init__(parent)
+    closed = pyqtSignal(object)  # Emits the note when closed.
+    def __init__(self, note):
+        super().__init__(None)  # No parent so the window remains independent.
         self.note = note
-        self.parent_window = parent  # Reference to MainWindow
         self.setWindowTitle("Sticky: " + (note.text[:15] + "..." if len(note.text) > 15 else note.text))
-        # Make the window frameless and always on top.
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setStyleSheet("background-color: #FFFB88; border: 2px solid #E6A800;")
         layout = QVBoxLayout()
@@ -82,9 +86,7 @@ class StickyNoteWindow(QWidget):
         event.accept()
 
     def closeEvent(self, event):
-        # When closed, notify the parent window to uncheck the sticky checkbox.
-        if self.parent_window:
-            self.parent_window.on_sticky_window_closed(self.note)
+        self.closed.emit(self.note)
         event.accept()
 
 # --- ReminderDialog Class ---
@@ -96,7 +98,8 @@ class ReminderDialog(QDialog):
         if reminder_type == "final":
             msg = f"Final Reminder:\n{note.text}\nTime: {note.date_time.strftime('%H:%M')}"
         elif reminder_type == "pre-final":
-            msg = f"Pre-Final Reminder (10 min before event):\n{note.text}\nTime: {(note.date_time - datetime.timedelta(minutes=10)).strftime('%H:%M')}"
+            msg = (f"Pre-Final Reminder (10 min before event):\n{note.text}\n"
+                   f"Time: {(note.date_time - datetime.timedelta(minutes=10)).strftime('%H:%M')}")
         else:
             msg = f"Reminder:\n{note.text}"
         layout.addWidget(QLabel(msg))
@@ -111,17 +114,16 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("RemindMeFy")
-        self.app_start_time = datetime.datetime.now()  # (Unused in near-event logic)
+        self.app_start_time = datetime.datetime.now()
         self.notes = []
         self.load_notes()
-        # Settings: days_earlier = reminder window; ext_reminder_interval_hours not used for near events.
         self.settings = {"startup": False, "days_earlier": 2, "ext_reminder_interval_hours": 4}
         self.load_settings()
-        self.current_edit_index = None
-        self.sorting_enabled = False  # Sorting toggle off by default
-        self.displayed_notes = []     # List of notes currently shown in the list.
-        self.sticky_windows = {}      # Persistent sticky windows for saved notes.
-        self.preview_sticky_window = None  # Preview sticky window for new note.
+        self.current_note_uid = None  # Store uid of the currently selected note.
+        self.sorting_enabled = False
+        self.displayed_notes = []
+        self.sticky_windows = {}         # Persistent sticky windows, keyed by note.uid.
+        self.preview_sticky_window = None  # Preview window for new notes.
         self.init_ui()
         self.init_tray_icon()
         self.init_timer(interval_ms=10000)
@@ -148,11 +150,11 @@ class MainWindow(QMainWindow):
         notes_layout.addWidget(QLabel("Enter Note:"))
         self.note_text = QTextEdit()
         notes_layout.addWidget(self.note_text)
-        # Sticky Note checkbox: show preview sticky window immediately.
+        # Sticky checkbox: immediately create sticky window when toggled.
         self.sticky_checkbox = QCheckBox("Sticky Note")
         self.sticky_checkbox.toggled.connect(self.on_sticky_checkbox_toggled)
         notes_layout.addWidget(self.sticky_checkbox)
-        # Dynamic labels for reminders:
+        # Reminder labels:
         self.next_reminder_label = QLabel("N/A")
         notes_layout.addWidget(self.next_reminder_label)
         self.pre_final_label = QLabel("")
@@ -173,7 +175,7 @@ class MainWindow(QMainWindow):
         self.clear_button.clicked.connect(self.clear_selection)
         btn_layout.addWidget(self.clear_button)
         notes_layout.addLayout(btn_layout)
-        # Horizontal layout for "Saved Notes:" and sort toggle button.
+        # Saved notes list and sort toggle.
         saved_notes_layout = QHBoxLayout()
         saved_notes_label = QLabel("Saved Notes:")
         saved_notes_layout.addWidget(saved_notes_label)
@@ -260,10 +262,6 @@ class MainWindow(QMainWindow):
             passed = [note for note in self.notes if note.date_time < now]
             sorted_upcoming = sorted(upcoming, key=lambda note: self.get_sort_key(note))
             self.displayed_notes = sorted_upcoming + passed
-            print("Sorting enabled. Sorted upcoming order:")
-            for note in sorted_upcoming:
-                key = self.get_sort_key(note)
-                print(f"Note '{note.text}' -> sort key: {key}")
             for note in self.displayed_notes:
                 dt_str = note.date_time.strftime("%Y-%m-%d %H:%M")
                 self.notes_list.addItem(f"{dt_str} - {note.text}")
@@ -275,7 +273,6 @@ class MainWindow(QMainWindow):
 
     def toggle_sorting(self):
         self.sorting_enabled = not self.sorting_enabled
-        print("Toggle sorting, new state:", self.sorting_enabled)
         if self.sorting_enabled:
             self.sort_button.setIcon(self.style().standardIcon(QStyle.SP_ArrowDown))
             self.sort_button.setToolTip("Turn sorting OFF")
@@ -285,26 +282,47 @@ class MainWindow(QMainWindow):
         self.update_notes_list()
 
     def on_sticky_checkbox_toggled(self, checked):
-        # Immediately show or close a preview sticky window for a new note
-        # (this happens regardless of current_edit_index)
+        # Create or close a sticky window immediately when the checkbox is toggled.
         if checked:
-            if self.preview_sticky_window is None:
-                preview_note = Note(datetime.datetime.now(), self.note_text.toPlainText(), sticky=True)
-                self.preview_sticky_window = StickyNoteWindow(preview_note, parent=self)
-                self.preview_sticky_window.show()
+            if self.current_note_uid:
+                # Edit mode: use the note corresponding to current_note_uid.
+                note = next((n for n in self.notes if n.uid == self.current_note_uid), None)
+                if note:
+                    if note.uid in self.sticky_windows:
+                        self.sticky_windows[note.uid].update_text(self.note_text.toPlainText())
+                    else:
+                        win = StickyNoteWindow(note)
+                        win.closed.connect(self.on_sticky_window_closed)
+                        win.show()
+                        self.sticky_windows[note.uid] = win
+            else:
+                # New-note mode: create a preview sticky window.
+                if self.preview_sticky_window is None:
+                    preview_note = Note(datetime.datetime.now(), self.note_text.toPlainText(), sticky=True)
+                    self.preview_sticky_window = StickyNoteWindow(preview_note)
+                    self.preview_sticky_window.closed.connect(self.on_sticky_window_closed)
+                    self.preview_sticky_window.show()
         else:
-            if self.preview_sticky_window is not None:
-                self.preview_sticky_window.close()
-                self.preview_sticky_window = None
+            # If unchecked, close the corresponding sticky window.
+            if self.current_note_uid:
+                note = next((n for n in self.notes if n.uid == self.current_note_uid), None)
+                if note and note.uid in self.sticky_windows:
+                    self.sticky_windows[note.uid].close()
+                    del self.sticky_windows[note.uid]
+            else:
+                if self.preview_sticky_window is not None:
+                    self.preview_sticky_window.close()
+                    self.preview_sticky_window = None
 
     def on_sticky_window_closed(self, note):
-        # Called when a sticky window is closed.
-        # If we're in new-note mode, uncheck the sticky checkbox.
-        if self.current_edit_index is None:
-            self.sticky_checkbox.setChecked(False)
+        # When a sticky window is closed manually, uncheck the sticky checkbox.
+        self.sticky_checkbox.blockSignals(True)
+        self.sticky_checkbox.setChecked(False)
+        self.sticky_checkbox.blockSignals(False)
+        if note.uid in self.sticky_windows:
+            del self.sticky_windows[note.uid]
+        if self.preview_sticky_window and self.preview_sticky_window.note.uid == note.uid:
             self.preview_sticky_window = None
-        else:
-            self.sticky_checkbox.setChecked(False)
 
     def add_note(self):
         dt = datetime.datetime.combine(self.date_edit.date().toPyDate(), self.time_edit.time().toPyTime())
@@ -318,25 +336,23 @@ class MainWindow(QMainWindow):
             self.clear_selection()
             self.save_notes()
             if sticky:
-                win = StickyNoteWindow(note, parent=self)
+                win = StickyNoteWindow(note)
+                win.closed.connect(self.on_sticky_window_closed)
                 win.show()
-                self.sticky_windows[id(note)] = win
+                self.sticky_windows[note.uid] = win
             if self.preview_sticky_window is not None:
                 self.preview_sticky_window.close()
                 self.preview_sticky_window = None
 
     def update_note(self):
-        if self.current_edit_index is not None:
+        if self.current_note_uid:
             dt = datetime.datetime.combine(self.date_edit.date().toPyDate(), self.time_edit.time().toPyTime())
             text = self.note_text.toPlainText().strip()
             sticky = self.sticky_checkbox.isChecked()
             if text:
-                if self.sorting_enabled:
-                    note = self.displayed_notes[self.current_edit_index]
-                    orig_index = self.notes.index(note)
-                    note = self.notes[orig_index]
-                else:
-                    note = self.notes[self.current_edit_index]
+                note = next((n for n in self.notes if n.uid == self.current_note_uid), None)
+                if note is None:
+                    return
                 note.date_time = dt
                 note.text = text
                 note.sticky = sticky
@@ -347,38 +363,33 @@ class MainWindow(QMainWindow):
                 self.save_notes()
                 self.clear_selection()
                 if sticky:
-                    if id(note) in self.sticky_windows:
-                        self.sticky_windows[id(note)].update_text(text)
+                    if note.uid in self.sticky_windows:
+                        self.sticky_windows[note.uid].update_text(text)
                     else:
-                        win = StickyNoteWindow(note, parent=self)
+                        win = StickyNoteWindow(note)
+                        win.closed.connect(self.on_sticky_window_closed)
                         win.show()
-                        self.sticky_windows[id(note)] = win
+                        self.sticky_windows[note.uid] = win
                 else:
-                    if id(note) in self.sticky_windows:
-                        self.sticky_windows[id(note)].close()
-                        del self.sticky_windows[id(note)]
+                    if note.uid in self.sticky_windows:
+                        self.sticky_windows[note.uid].close()
+                        del self.sticky_windows[note.uid]
 
     def delete_note(self):
-        if self.current_edit_index is not None:
-            if self.sorting_enabled:
-                note = self.displayed_notes[self.current_edit_index]
-                self.notes.remove(note)
-                if id(note) in self.sticky_windows:
-                    self.sticky_windows[id(note)].close()
-                    del self.sticky_windows[id(note)]
-            else:
-                note = self.notes[self.current_edit_index]
-                del self.notes[self.current_edit_index]
-                if id(note) in self.sticky_windows:
-                    self.sticky_windows[id(note)].close()
-                    del self.sticky_windows[id(note)]
+        if self.current_note_uid:
+            note = next((n for n in self.notes if n.uid == self.current_note_uid), None)
+            if note:
+                self.notes = [n for n in self.notes if n.uid != note.uid]
+                if note.uid in self.sticky_windows:
+                    self.sticky_windows[note.uid].close()
+                    del self.sticky_windows[note.uid]
             self.update_notes_list()
             self.clear_selection()
             self.save_notes()
 
     def clear_selection(self):
         self.notes_list.clearSelection()
-        self.current_edit_index = None
+        self.current_note_uid = None
         self.note_text.clear()
         self.date_edit.setDate(datetime.date.today())
         self.time_edit.setTime(datetime.datetime.now().time().replace(second=0, microsecond=0))
@@ -386,7 +397,9 @@ class MainWindow(QMainWindow):
         self.pre_final_label.setText("")
         self.update_button.setEnabled(False)
         self.delete_button.setEnabled(False)
+        self.sticky_checkbox.blockSignals(True)
         self.sticky_checkbox.setChecked(False)
+        self.sticky_checkbox.blockSignals(False)
         if self.preview_sticky_window is not None:
             self.preview_sticky_window.close()
             self.preview_sticky_window = None
@@ -396,20 +409,24 @@ class MainWindow(QMainWindow):
             index = self.notes_list.row(item)
             if 0 <= index < len(self.displayed_notes):
                 note = self.displayed_notes[index]
-                self.current_edit_index = self.notes.index(note)
+                self.current_note_uid = note.uid
         else:
             index = self.notes_list.row(item)
             if 0 <= index < len(self.notes):
-                self.current_edit_index = index
                 note = self.notes[index]
-        if self.current_edit_index is not None:
-            note = self.notes[self.current_edit_index]
+                self.current_note_uid = note.uid
+        if self.current_note_uid:
+            note = next((n for n in self.notes if n.uid == self.current_note_uid), None)
+            if note is None:
+                return
             self.date_edit.setDate(note.date_time.date())
             self.time_edit.setTime(QTime(note.date_time.hour, note.date_time.minute))
             self.note_text.setText(note.text)
             self.update_button.setEnabled(True)
             self.delete_button.setEnabled(True)
+            self.sticky_checkbox.blockSignals(True)
             self.sticky_checkbox.setChecked(note.sticky)
+            self.sticky_checkbox.blockSignals(False)
             now = datetime.datetime.now()
             if note.date_time < now:
                 self.next_reminder_label.setText("Event Passed")
@@ -513,7 +530,8 @@ class MainWindow(QMainWindow):
             if enable:
                 exe_path = sys.executable
                 script_path = os.path.abspath(__file__)
-                winreg.SetValueEx(key, "RemindMeFy", 0, winreg.REG_SZ, f'"{exe_path}" "{script_path}"')
+                winreg.SetValueEx(key, "RemindMeFy", 0, winreg.REG_SZ,
+                                  f'"{exe_path}" "{script_path}"')
             else:
                 try:
                     winreg.DeleteValue(key, "RemindMeFy")
@@ -549,7 +567,8 @@ class MainWindow(QMainWindow):
         elif r_type == "ext":
             msg = f"Reminder:\n{note.text}\nEvent: {note.date_time.strftime('%Y-%m-%d %H:%M')}"
         elif r_type == "pre-final":
-            msg = f"Pre-Final Reminder:\n{note.text}\nTime: {(note.date_time - datetime.timedelta(minutes=10)).strftime('%H:%M')}"
+            msg = (f"Pre-Final Reminder:\n{note.text}\n"
+                   f"Time: {(note.date_time - datetime.timedelta(minutes=10)).strftime('%H:%M')}")
         else:
             msg = f"Reminder:\n{note.text}"
         self.tray_icon.showMessage("RemindMeFy Reminder", msg, QSystemTrayIcon.Information, 10000)
