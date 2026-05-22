@@ -383,7 +383,7 @@ class RemindMeFyApp(ctk.CTk):
             
         self.appearance_mode_label = ctk.CTkLabel(self.sidebar, text="Appearance Mode:", anchor="w")
         self.appearance_mode_label.pack(side="bottom", padx=20, pady=(10, 0))
-        self.appearance_mode_optionemenu = ctk.CTkOptionMenu(self.sidebar, values=["Light", "Dark", "System"],
+        self.appearance_mode_optionemenu = ctk.CTkOptionMenu(self.sidebar, values=["Light", "Dark"],
                                                                command=self.change_appearance_mode_event)
         self.appearance_mode_optionemenu.set(self.settings.appearance_mode.capitalize())
         self.appearance_mode_optionemenu.pack(side="bottom", padx=20, pady=(10, 20))
