@@ -100,10 +100,12 @@ class SettingsModel(BaseModel):
         startup: Whether to start the application on Windows boot.
         days_earlier: Default days before an event to start showing reminders.
         ext_reminder_interval_hours: Frequency of reminders in hours.
+        appearance_mode: UI theme (light, dark, system).
     """
     startup: bool = False
     days_earlier: int = 2
     ext_reminder_interval_hours: int = 4
+    appearance_mode: str = "dark"
 
 # -------------------------------
 # Logic Helpers
@@ -325,11 +327,12 @@ class RemindMeFyApp(ctk.CTk):
         self.title("RemindMeFy")
         self.geometry("1100x700")
         self.resizable(False, False) # Disable maximize/resize
-        ctk.set_appearance_mode("dark")
         
         self.base_path = Path(__file__).parent
         self.note_manager = NoteManager(self.base_path / "notes.json")
         self.settings = self.load_settings()
+        
+        ctk.set_appearance_mode(self.settings.appearance_mode)
         self.sticky_windows: Dict[str, StickyNote] = {}
         
         # State for form
@@ -371,14 +374,28 @@ class RemindMeFyApp(ctk.CTk):
         
         self.sidebar = ctk.CTkFrame(self, width=200, corner_radius=0)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
+        self.sidebar.grid_rowconfigure(5, weight=1)
         
         ctk.CTkLabel(self.sidebar, text="RemindMeFy", font=("Segoe UI", 24, "bold")).pack(pady=30)
         for name, cmd in [("Dashboard", self.show_dashboard), ("Add Note", self.show_add_note), 
                           ("Archive", self.show_archive), ("Settings", self.show_settings)]:
             ctk.CTkButton(self.sidebar, text=name, command=cmd, height=40, font=("Segoe UI", 14)).pack(pady=10, padx=20)
             
+        self.appearance_mode_label = ctk.CTkLabel(self.sidebar, text="Appearance Mode:", anchor="w")
+        self.appearance_mode_label.pack(side="bottom", padx=20, pady=(10, 0))
+        self.appearance_mode_optionemenu = ctk.CTkOptionMenu(self.sidebar, values=["Light", "Dark", "System"],
+                                                               command=self.change_appearance_mode_event)
+        self.appearance_mode_optionemenu.set(self.settings.appearance_mode.capitalize())
+        self.appearance_mode_optionemenu.pack(side="bottom", padx=20, pady=(10, 20))
+            
         self.main_container = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
         self.main_container.grid(row=0, column=1, sticky="nsew", padx=30, pady=30)
+
+    def change_appearance_mode_event(self, new_appearance_mode: str):
+        mode = new_appearance_mode.lower()
+        ctk.set_appearance_mode(mode)
+        self.settings.appearance_mode = mode
+        self.save_settings()
 
     def show_dashboard(self):
         self._clear_main()
