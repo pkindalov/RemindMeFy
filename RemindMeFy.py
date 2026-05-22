@@ -12,6 +12,7 @@ import sys
 import uuid
 import threading
 import time
+import calendar
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
@@ -182,6 +183,99 @@ class NoteManager:
 # GUI Components
 # -------------------------------
 
+class CalendarPicker(ctk.CTkToplevel):
+    """A custom calendar picker window."""
+    def __init__(self, master, initial_date: datetime.date, callback):
+        super().__init__(master)
+        self.title("Select Date")
+        self.geometry("300x350")
+        self.resizable(False, False)
+        self.attributes("-topmost", True)
+        self.grab_set()
+        
+        self.callback = callback
+        self.view_date = initial_date
+        self.setup_ui()
+
+    def setup_ui(self):
+        for widget in self.winfo_children(): widget.destroy()
+        
+        header = ctk.CTkFrame(self)
+        header.pack(fill="x", pady=10)
+        
+        ctk.CTkButton(header, text="<", width=30, command=self.prev_month).pack(side="left", padx=10)
+        self.month_label = ctk.CTkLabel(header, text=self.view_date.strftime("%B %Y"), font=("Segoe UI", 16, "bold"))
+        self.month_label.pack(side="left", expand=True)
+        ctk.CTkButton(header, text=">", width=30, command=self.next_month).pack(side="right", padx=10)
+        
+        days_frame = ctk.CTkFrame(self)
+        days_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        for i, day in enumerate(["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]):
+            ctk.CTkLabel(days_frame, text=day, width=35).grid(row=0, column=i)
+            
+        month_days = calendar.monthcalendar(self.view_date.year, self.view_date.month)
+        for r, week in enumerate(month_days):
+            for c, day in enumerate(week):
+                if day != 0:
+                    btn_date = datetime.date(self.view_date.year, self.view_date.month, day)
+                    fg = "transparent"
+                    if btn_date == datetime.date.today(): fg = "gray25"
+                    
+                    btn = ctk.CTkButton(days_frame, text=str(day), width=35, height=35, fg_color=fg,
+                                        command=lambda d=btn_date: self.select_date(d))
+                    btn.grid(row=r+1, column=c, padx=2, pady=2)
+
+    def prev_month(self):
+        first = self.view_date.replace(day=1)
+        self.view_date = (first - datetime.timedelta(days=1)).replace(day=1)
+        self.setup_ui()
+
+    def next_month(self):
+        self.view_date = (self.view_date.replace(day=28) + datetime.timedelta(days=4)).replace(day=1)
+        self.setup_ui()
+
+    def select_date(self, date):
+        self.callback(date)
+        self.destroy()
+
+class ClockPicker(ctk.CTkToplevel):
+    """A custom time picker window."""
+    def __init__(self, master, initial_time: datetime.time, callback):
+        super().__init__(master)
+        self.title("Select Time")
+        self.geometry("250x300")
+        self.resizable(False, False)
+        self.attributes("-topmost", True)
+        self.grab_set()
+        
+        self.callback = callback
+        self.hour = ctk.IntVar(value=initial_time.hour)
+        self.minute = ctk.IntVar(value=initial_time.minute)
+        self.setup_ui()
+
+    def setup_ui(self):
+        self.time_display = ctk.CTkLabel(self, text=f"{self.hour.get():02d}:{self.minute.get():02d}", 
+                                         font=("Segoe UI", 32, "bold"))
+        self.time_display.pack(pady=20)
+        
+        ctk.CTkLabel(self, text="Hour").pack()
+        self.h_slider = ctk.CTkSlider(self, from_=0, to=23, number_of_steps=23, variable=self.hour, command=self.update_label)
+        self.h_slider.pack(pady=10, padx=20)
+        
+        ctk.CTkLabel(self, text="Minute").pack()
+        self.m_slider = ctk.CTkSlider(self, from_=0, to=59, number_of_steps=59, variable=self.minute, command=self.update_label)
+        self.m_slider.pack(pady=10, padx=20)
+        
+        ctk.CTkButton(self, text="OK", command=self.select_time).pack(pady=20)
+
+    def update_label(self, _):
+        self.time_display.configure(text=f"{self.hour.get():02d}:{self.minute.get():02d}")
+
+    def select_time(self):
+        self.callback(datetime.time(self.hour.get(), self.minute.get()))
+        self.destroy()
+
 class ReminderPopup(ctk.CTkToplevel):
     """Modern reminder dialog."""
     def __init__(self, note: NoteModel, reminder_type: str):
@@ -230,11 +324,17 @@ class RemindMeFyApp(ctk.CTk):
         super().__init__()
         self.title("RemindMeFy")
         self.geometry("1100x700")
+        self.resizable(False, False) # Disable maximize/resize
+        ctk.set_appearance_mode("dark")
         
         self.base_path = Path(__file__).parent
         self.note_manager = NoteManager(self.base_path / "notes.json")
         self.settings = self.load_settings()
         self.sticky_windows: Dict[str, StickyNote] = {}
+        
+        # State for form
+        self.selected_date = datetime.date.today()
+        self.selected_time = datetime.datetime.now().time().replace(second=0, microsecond=0)
         
         self.setup_ui()
         self.setup_tray()
@@ -272,21 +372,21 @@ class RemindMeFyApp(ctk.CTk):
         self.sidebar = ctk.CTkFrame(self, width=200, corner_radius=0)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
         
-        ctk.CTkLabel(self.sidebar, text="RemindMeFy", font=("Segoe UI", 20, "bold")).pack(pady=20)
+        ctk.CTkLabel(self.sidebar, text="RemindMeFy", font=("Segoe UI", 24, "bold")).pack(pady=30)
         for name, cmd in [("Dashboard", self.show_dashboard), ("Add Note", self.show_add_note), 
                           ("Archive", self.show_archive), ("Settings", self.show_settings)]:
-            ctk.CTkButton(self.sidebar, text=name, command=cmd).pack(pady=10, padx=20)
+            ctk.CTkButton(self.sidebar, text=name, command=cmd, height=40, font=("Segoe UI", 14)).pack(pady=10, padx=20)
             
         self.main_container = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
-        self.main_container.grid(row=0, column=1, sticky="nsew", padx=20, pady=20)
+        self.main_container.grid(row=0, column=1, sticky="nsew", padx=30, pady=30)
 
     def show_dashboard(self):
         self._clear_main()
-        ctk.CTkLabel(self.main_container, text="Active Reminders", font=("Segoe UI", 24, "bold")).pack(pady=(0, 20), anchor="w")
+        ctk.CTkLabel(self.main_container, text="Active Reminders", font=("Segoe UI", 28, "bold")).pack(pady=(0, 30), anchor="w")
         
         search_frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
         search_frame.pack(fill="x", pady=(0, 20))
-        self.search_entry = ctk.CTkEntry(search_frame, placeholder_text="Search...")
+        self.search_entry = ctk.CTkEntry(search_frame, placeholder_text="Search reminders...", height=40)
         self.search_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
         self.search_entry.bind("<KeyRelease>", lambda e: self.render_notes(self.search_entry.get()))
         
@@ -302,54 +402,93 @@ class RemindMeFyApp(ctk.CTk):
         if query: notes = [n for n in notes if query.lower() in n.text.lower()]
         
         for note in notes:
-            if (self.main_container.winfo_children()[0].cget("text") == "Archive") == (note.next_occurrence < now and note.repeat_mode == "None"):
+            is_archived = note.next_occurrence < now and note.repeat_mode == "None"
+            current_is_archive_view = "Archive" in self.main_container.winfo_children()[0].cget("text")
+            
+            if current_is_archive_view == is_archived:
                 self.create_card(note)
 
     def create_card(self, note: NoteModel):
         card = ctk.CTkFrame(self.scroll_frame)
-        card.pack(fill="x", pady=5, padx=5)
+        card.pack(fill="x", pady=10, padx=5)
         
-        ctk.CTkLabel(card, text=f"{note.next_occurrence.strftime('%Y-%m-%d %H:%M')} | {note.repeat_mode}", font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=10, pady=5)
-        ctk.CTkLabel(card, text=note.text, wraplength=700, justify="left").pack(anchor="w", padx=10, pady=5)
+        header = ctk.CTkFrame(card, fg_color="transparent")
+        header.pack(fill="x", padx=15, pady=10)
+        
+        ctk.CTkLabel(header, text=note.next_occurrence.strftime('%Y-%m-%d %H:%M'), font=("Segoe UI", 16, "bold")).pack(side="left")
+        ctk.CTkLabel(header, text=f"| {note.repeat_mode}", text_color="gray70").pack(side="left", padx=10)
+        
+        content = ctk.CTkLabel(card, text=note.text, wraplength=650, justify="left", font=("Segoe UI", 14))
+        content.pack(anchor="w", padx=15, pady=(0, 15))
         
         actions = ctk.CTkFrame(card, fg_color="transparent")
-        actions.pack(fill="x", padx=10, pady=5)
-        ctk.CTkButton(actions, text="Edit", width=60, height=24, command=lambda n=note: self.show_add_note(n)).pack(side="right", padx=5)
-        ctk.CTkButton(actions, text="Delete", width=60, height=24, fg_color="red", command=lambda u=note.uid: self.delete_note(u)).pack(side="right", padx=5)
+        actions.pack(fill="x", padx=15, pady=(0, 10))
+        ctk.CTkButton(actions, text="Edit", width=80, height=30, command=lambda n=note: self.show_add_note(n)).pack(side="right", padx=5)
+        ctk.CTkButton(actions, text="Delete", width=80, height=30, fg_color="#E74C3C", hover_color="#C0392B", 
+                      command=lambda u=note.uid: self.delete_note(u)).pack(side="right", padx=5)
+        
+        if note.sticky:
+            ctk.CTkLabel(actions, text="Sticky", text_color="#F1C40F", font=("Segoe UI", 12, "bold")).pack(side="left")
 
     def show_add_note(self, note: Optional[NoteModel] = None):
         self._clear_main()
-        ctk.CTkLabel(self.main_container, text="Edit Note" if note else "Add Note", font=("Segoe UI", 24, "bold")).pack(pady=(0, 20), anchor="w")
+        self.selected_date = note.date_time.date() if note else datetime.date.today()
+        self.selected_time = note.date_time.time() if note else datetime.datetime.now().time().replace(second=0, microsecond=0)
+        
+        ctk.CTkLabel(self.main_container, text="Edit Reminder" if note else "New Reminder", 
+                     font=("Segoe UI", 28, "bold")).pack(pady=(0, 30), anchor="w")
         
         form = ctk.CTkFrame(self.main_container)
-        form.pack(fill="both", expand=True, padx=20, pady=20)
+        form.pack(fill="both", expand=True, padx=10, pady=10)
         
-        # Simple Date/Time Entry
-        f1 = ctk.CTkFrame(form, fg_color="transparent")
-        f1.pack(fill="x", pady=10)
-        self.date_e = ctk.CTkEntry(f1, placeholder_text="YYYY-MM-DD", width=120)
-        self.date_e.insert(0, note.date_time.strftime("%Y-%m-%d") if note else datetime.date.today().isoformat())
-        self.date_e.pack(side="left", padx=10)
-        self.time_e = ctk.CTkEntry(f1, placeholder_text="HH:MM", width=80)
-        self.time_e.insert(0, note.date_time.strftime("%H:%M") if note else datetime.datetime.now().strftime("%H:%M"))
-        self.time_e.pack(side="left")
+        # Date & Time Pickers
+        pick_frame = ctk.CTkFrame(form, fg_color="transparent")
+        pick_frame.pack(fill="x", pady=20, padx=20)
         
+        self.date_btn = ctk.CTkButton(pick_frame, text=f"Date: {self.selected_date}", width=180, height=40,
+                                      command=self.open_calendar)
+        self.date_btn.pack(side="left", padx=(0, 20))
+        
+        self.time_btn = ctk.CTkButton(pick_frame, text=f"Time: {self.selected_time.strftime('%H:%M')}", width=120, height=40,
+                                      command=self.open_clock)
+        self.time_btn.pack(side="left")
+        
+        ctk.CTkLabel(form, text="Repeat Mode:").pack(anchor="w", padx=25)
         self.repeat_v = ctk.StringVar(value=note.repeat_mode if note else "None")
-        ctk.CTkOptionMenu(form, values=["None", "Daily", "Weekly", "Monthly", "Yearly"], variable=self.repeat_v).pack(pady=10)
+        ctk.CTkOptionMenu(form, values=["None", "Daily", "Weekly", "Monthly", "Yearly"], variable=self.repeat_v, height=35).pack(pady=10, padx=25, anchor="w")
         
-        self.txt = ctk.CTkTextbox(form, height=150)
+        ctk.CTkLabel(form, text="Note:").pack(anchor="w", padx=25)
+        self.txt = ctk.CTkTextbox(form, height=180, font=("Segoe UI", 14))
         self.txt.insert("0.0", note.text if note else "")
-        self.txt.pack(fill="x", padx=15, pady=10)
+        self.txt.pack(fill="x", padx=25, pady=10)
         
         self.sticky_v = ctk.BooleanVar(value=note.sticky if note else False)
-        ctk.CTkCheckBox(form, text="Sticky Note", variable=self.sticky_v).pack(anchor="w", padx=20)
+        ctk.CTkCheckBox(form, text="Sticky Note", variable=self.sticky_v).pack(anchor="w", padx=25, pady=5)
         
-        ctk.CTkButton(form, text="Save", command=lambda: self.save_note(note)).pack(pady=20)
+        ctk.CTkButton(form, text="Save Reminder", height=45, font=("Segoe UI", 16, "bold"),
+                      command=lambda: self.save_note(note)).pack(pady=30)
+
+    def open_calendar(self):
+        CalendarPicker(self, self.selected_date, self.on_date_selected)
+
+    def on_date_selected(self, date):
+        self.selected_date = date
+        self.date_btn.configure(text=f"Date: {date}")
+
+    def open_clock(self):
+        ClockPicker(self, self.selected_time, self.on_time_selected)
+
+    def on_time_selected(self, time_obj):
+        self.selected_time = time_obj
+        self.time_btn.configure(text=f"Time: {time_obj.strftime('%H:%M')}")
 
     def save_note(self, existing: Optional[NoteModel]):
         try:
-            dt = datetime.datetime.strptime(f"{self.date_e.get()} {self.time_e.get()}", "%Y-%m-%d %H:%M")
-            note = NoteModel(uid=existing.uid if existing else str(uuid.uuid4()), date_time=dt, text=self.txt.get("0.0", "end").strip(),
+            dt = datetime.datetime.combine(self.selected_date, self.selected_time)
+            text = self.txt.get("0.0", "end").strip()
+            if not text: return
+            
+            note = NoteModel(uid=existing.uid if existing else str(uuid.uuid4()), date_time=dt, text=text,
                              sticky=self.sticky_v.get(), repeat_mode=self.repeat_v.get(), next_occurrence=dt)
             if existing: self.note_manager.notes = [n if n.uid != note.uid else note for n in self.note_manager.notes]
             else: self.note_manager.notes.append(note)
@@ -370,22 +509,22 @@ class RemindMeFyApp(ctk.CTk):
 
     def show_archive(self):
         self._clear_main()
-        ctk.CTkLabel(self.main_container, text="Archive", font=("Segoe UI", 24, "bold")).pack(pady=(0, 20), anchor="w")
+        ctk.CTkLabel(self.main_container, text="Archive", font=("Segoe UI", 28, "bold")).pack(pady=(0, 30), anchor="w")
         self.scroll_frame = ctk.CTkScrollableFrame(self.main_container)
         self.scroll_frame.pack(fill="both", expand=True)
         self.render_notes()
 
     def show_settings(self):
         self._clear_main()
-        ctk.CTkLabel(self.main_container, text="Settings", font=("Segoe UI", 24, "bold")).pack(pady=(0, 20), anchor="w")
+        ctk.CTkLabel(self.main_container, text="Settings", font=("Segoe UI", 28, "bold")).pack(pady=(0, 30), anchor="w")
         c = ctk.CTkFrame(self.main_container)
-        c.pack(fill="both", expand=True, padx=20, pady=20)
+        c.pack(fill="both", expand=True, padx=10, pady=10)
         
-        self.start_cb = ctk.CTkCheckBox(c, text="Start with Windows")
+        self.start_cb = ctk.CTkCheckBox(c, text="Start with Windows (Auto-launch)")
         if self.settings.startup: self.start_cb.select()
-        self.start_cb.pack(pady=20, padx=20, anchor="w")
+        self.start_cb.pack(pady=30, padx=30, anchor="w")
         
-        ctk.CTkButton(c, text="Save Settings", command=self.apply_settings).pack(pady=20)
+        ctk.CTkButton(c, text="Save Settings", height=40, command=self.apply_settings).pack(pady=20, padx=30, anchor="w")
 
     def apply_settings(self):
         self.settings.startup = bool(self.start_cb.get())
@@ -399,8 +538,13 @@ class RemindMeFyApp(ctk.CTk):
     # ---------------------------
     def setup_tray(self):
         img = Image.open(self.base_path / "remindmefy.ico") if (self.base_path / "remindmefy.ico").exists() else Image.new('RGB', (64, 64), (73, 109, 137))
-        self.tray = pystray.Icon("RemindMeFy", img, "RemindMeFy", pystray.Menu(pystray.MenuItem('Show', self.deiconify), pystray.MenuItem('Exit', self.quit_app)))
+        self.tray = pystray.Icon("RemindMeFy", img, "RemindMeFy", pystray.Menu(pystray.MenuItem('Show', self.show_window), pystray.MenuItem('Exit', self.quit_app)))
         threading.Thread(target=self.tray.run, daemon=True).start()
+
+    def show_window(self):
+        self.deiconify()
+        self.lift()
+        self.focus_force()
 
     def quit_app(self):
         self.tray.stop()
@@ -416,7 +560,6 @@ class RemindMeFyApp(ctk.CTk):
     def check_reminders(self):
         now = datetime.datetime.now()
         for note in self.note_manager.notes:
-            # Full Logic Parity
             if note.repeat_mode != "None" and now >= note.next_occurrence:
                 note.next_occurrence = compute_next_occurrence(note)
                 note.pre_final_triggered = note.final_reminder_triggered = False
@@ -432,7 +575,6 @@ class RemindMeFyApp(ctk.CTk):
                 self.trigger_reminder(note, "pre-final")
                 note.pre_final_triggered = True
             elif now < pre_final_time:
-                # Dynamic/Ext logic
                 interval = get_dynamic_interval(note.next_occurrence - now)
                 last = note.last_daily_reminder_time or note.last_ext_reminder
                 if not last or now >= last + interval:
