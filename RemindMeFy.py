@@ -16,6 +16,7 @@ import calendar
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
+from dateutil.relativedelta import relativedelta
 import customtkinter as ctk
 import pystray
 from PIL import Image
@@ -137,8 +138,8 @@ def compute_next_occurrence(note: NoteModel) -> datetime.datetime:
     target = note.next_occurrence
     if note.repeat_mode == "Daily": return target + datetime.timedelta(days=1)
     if note.repeat_mode == "Weekly": return target + datetime.timedelta(weeks=1)
-    if note.repeat_mode == "Monthly": return target + datetime.timedelta(days=30)
-    if note.repeat_mode == "Yearly": return target + datetime.timedelta(days=365)
+    if note.repeat_mode == "Monthly": return target + relativedelta(months=1)
+    if note.repeat_mode == "Yearly": return target + relativedelta(years=1)
     if note.repeat_mode == "Custom":
         days = note.repeat_interval_days or 0
         hours = note.repeat_interval_hours or 0
@@ -577,17 +578,20 @@ class RemindMeFyApp(ctk.CTk):
     def check_reminders(self):
         now = datetime.datetime.now()
         for note in self.note_manager.notes:
-            if note.repeat_mode != "None" and now >= note.next_occurrence:
-                note.next_occurrence = compute_next_occurrence(note)
-                note.pre_final_triggered = note.final_reminder_triggered = False
-                note.last_ext_reminder = note.last_daily_reminder_time = None
-            
             threshold = datetime.timedelta(minutes=10)
             pre_final_time = note.next_occurrence - threshold
             
+            # Handle final reminder
             if now >= note.next_occurrence and not note.final_reminder_triggered:
                 self.trigger_reminder(note, "final")
                 note.final_reminder_triggered = True
+                
+            # If repeating, advance to next future occurrence after final trigger
+            if note.repeat_mode != "None" and now >= note.next_occurrence and note.final_reminder_triggered:
+                while note.next_occurrence <= now:
+                    note.next_occurrence = compute_next_occurrence(note)
+                note.pre_final_triggered = note.final_reminder_triggered = False
+                note.last_ext_reminder = note.last_daily_reminder_time = None
             elif now >= pre_final_time and not note.pre_final_triggered and now < note.next_occurrence:
                 self.trigger_reminder(note, "pre-final")
                 note.pre_final_triggered = True
