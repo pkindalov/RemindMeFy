@@ -40,11 +40,64 @@ def test_compute_next_occurrence_complex():
     
     # Monthly
     note_m = NoteModel(date_time=dt, text="Monthly", next_occurrence=dt, repeat_mode="Monthly")
-    assert compute_next_occurrence(note_m) == dt + datetime.timedelta(days=30)
+    # Now uses relativedelta, so it should be exactly 1 month later
+    assert compute_next_occurrence(note_m) == datetime.datetime(2026, 6, 22, 12, 0)
     
     # Yearly
     note_y = NoteModel(date_time=dt, text="Yearly", next_occurrence=dt, repeat_mode="Yearly")
-    assert compute_next_occurrence(note_y) == dt + datetime.timedelta(days=365)
+    # Yearly now uses relativedelta, so it should be exactly 1 year later
+    # 2026-05-22 -> 2027-05-22
+    assert compute_next_occurrence(note_y) == datetime.datetime(2027, 5, 22, 12, 0)
+
+def test_repeating_reminder_advancement_logic():
+    """Verify that a repeating reminder advances to the future in one go."""
+    now = datetime.datetime(2026, 5, 26, 12, 0)
+    past_date = now - datetime.timedelta(days=5) # 5 days ago (May 21)
+    
+    note = NoteModel(
+        date_time=past_date,
+        text="Past Daily Note",
+        next_occurrence=past_date,
+        repeat_mode="Daily"
+    )
+    
+    # Simulate the fixed check_reminders logic
+    notifications_count = 0
+    
+    # 1. Handle final reminder
+    if now >= note.next_occurrence and not note.final_reminder_triggered:
+        notifications_count += 1
+        note.final_reminder_triggered = True
+        
+    # 2. If repeating, advance to next future occurrence after final trigger
+    if note.repeat_mode != "None" and now >= note.next_occurrence and note.final_reminder_triggered:
+        while note.next_occurrence <= now:
+            note.next_occurrence = compute_next_occurrence(note)
+        note.pre_final_triggered = note.final_reminder_triggered = False
+        note.last_ext_reminder = note.last_daily_reminder_time = None
+        
+    assert notifications_count == 1
+    assert note.next_occurrence > now
+    # 21 -> 22 -> 23 -> 24 -> 25 -> 26 -> 27.
+    assert note.next_occurrence == datetime.datetime(2026, 5, 27, 12, 0)
+    assert not note.final_reminder_triggered
+
+def test_monthly_yearly_accuracy():
+    """Verify that relativedelta is used for Monthly and Yearly."""
+    dt = datetime.datetime(2024, 1, 31, 12, 0) # Leap year, end of month
+    note = NoteModel(date_time=dt, text="Monthly", next_occurrence=dt, repeat_mode="Monthly")
+    
+    # Feb 2024 has 29 days. relativedelta(months=1) from Jan 31 should be Feb 29.
+    next_occ = compute_next_occurrence(note)
+    assert next_occ.month == 2
+    assert next_occ.day == 29
+    
+    note.repeat_mode = "Yearly"
+    # Year later should be Jan 31 2025
+    next_occ = compute_next_occurrence(note)
+    assert next_occ.year == 2025
+    assert next_occ.month == 1
+    assert next_occ.day == 31
 
 def test_reminder_thresholds():
     # Pre-final is 10 minutes before
